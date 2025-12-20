@@ -1,0 +1,20 @@
+$date today $end
+$version 1.0 $end
+$timescale 1ns $end
+$scope module top $end
+$var wire 1 ! clk $end
+$var wire 8 " data $end
+$upscope $end
+$enddefinitions $end
+#0
+0!
+b00000000 "
+#5
+1!
+#10
+0!
+b11111111 "
+#15
+1!
+#20
+0!

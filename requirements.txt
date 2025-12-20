@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+numpy
+typer
+pydantic
+requests
+duckdb
+redis
+pyarrow
