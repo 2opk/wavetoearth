@@ -3,11 +3,8 @@
 High-performance, Agent-friendly RTL waveform analysis tool designed to bridge the gap between heavy VCD files and LLM-based reasoning.
 
 ## Logic
-`wavetoearth` uses a Client-Server architecture.
-1. **Server (`serve`)**: Loads the heavy VCD file into RAM (using efficient Numpy arrays).
-2. **Client (`query`)**: Sends lightweight JSON queries to the server to get instant signal values.
-
-This allows an LLM Agent to explore the waveform interactively without waiting for parsing every time.
+`wavetoearth` uses a Client-Server architecture, but the server is now **transparent** to the user.
+The CLI auto-starts the daemon, loads the file, and returns structured JSON for agentic analysis.
 
 ## Installation
 
@@ -22,9 +19,33 @@ conda activate wavetoearth
 
 # 2. Install Dependencies
 pip install -r requirements.txt
+
+# 3. Install CLI entrypoint
+pip install -e .
 ```
 
-## Usage
+## Usage (Transparent Mode)
+One command = start server + load file + inspect.
+
+```bash
+wavetoearth /path/to/file.vcd \
+  --from 750000 --to 800000 \
+  --signals "chiptop.gemmini.io_busy,chiptop.core.csr.io_stall"
+```
+
+Cycle-based range:
+```bash
+wavetoearth /path/to/file.fst \
+  --clock chiptop.clock --start-cycle 100 --end-cycle 200 \
+  --signals "chiptop.gemmini.io_busy"
+```
+
+### Multi-file (shell glob)
+```bash
+wavetoearth /path/to/*.fst --from 750000 --to 800000 --signals "chiptop.gemmini.io_busy"
+```
+
+## Usage (Explicit Mode)
 
 ### 1. Start the Server
 Run this in a separate terminal (or background):
@@ -48,3 +69,6 @@ python cli.py query --signal "chiptop.gemmini.io_busy" --start 1000 --end 2000
 ```bash
 python cli.py signals --pattern "busy"
 ```
+
+## Environment
+- `WAVETOEART_SERVER_URL`: Override server URL (default `http://localhost:8000`)

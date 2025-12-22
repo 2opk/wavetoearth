@@ -39,10 +39,38 @@ impl WaveParser {
         Ok(())
     }
 
+    /// Converts a VCD file to a sharded Parquet directory using FastVCD (Parallel)
+    fn convert_to_parquet_sharded(
+        &self,
+        vcd_path: String,
+        parquet_dir: String,
+        chunk_size: usize,
+        shards: usize,
+    ) -> PyResult<()> {
+        let parser = FastVcdParser::new(&vcd_path).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(format!("FastVCD Init Error: {}", e))
+        })?;
+        parser.parse_to_parquet_sharded(&parquet_dir, chunk_size, shards)?;
+        Ok(())
+    }
+
     /// Converts an FST file to a Parquet file using FastFST (Native Streaming)
     fn convert_fst_to_parquet(&self, fst_path: String, parquet_path: String, chunk_size: usize) -> PyResult<()> {
         let parser = FastFstParser::new(&fst_path);
         parser.parse_to_parquet(&parquet_path, chunk_size)?;
+        Ok(())
+    }
+
+    /// Converts an FST file to a sharded Parquet directory using FastFST (Parallel)
+    fn convert_fst_to_parquet_sharded(
+        &self,
+        fst_path: String,
+        parquet_dir: String,
+        chunk_size: usize,
+        shards: usize,
+    ) -> PyResult<()> {
+        let parser = FastFstParser::new(&fst_path);
+        parser.parse_to_parquet_sharded(&parquet_dir, chunk_size, shards)?;
         Ok(())
     }
 }

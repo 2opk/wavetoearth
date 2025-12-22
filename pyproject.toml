@@ -11,12 +11,25 @@ dependencies = [
     "numpy",
     "typer",
     "pydantic",
+    "requests",
+    "duckdb",
+    "pyarrow",
+    "redis",
 ]
 requires-python = ">=3.9"
+
+[project.scripts]
+wavetoearth = "cli:main_cli"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# No longer a package in wavetoearth/wavetoearth, but scripts might need adjustment.
-# For now, simplistic setup.
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "cli.py",
+    "server.py",
+    "core",
+    "README.md",
+    "requirements.txt",
+]
