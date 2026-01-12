@@ -23,6 +23,7 @@ class WaveformDatabase:
         self.global_path: Optional[str] = None
         self.cycle_tables: Dict[str, str] = {}
         self.signal_cache: Dict[str, int] = {}
+        self.signal_cache_name: Dict[str, str] = {}
         self.rust_parser = wavetoearth_core.WaveParser()
 
     def load(self, path: str):
@@ -149,46 +150,76 @@ class WaveformDatabase:
         res = self.conn.execute(query).fetchall()
         return [r[0] for r in res]
 
-    def _signal_id(self, signal: str) -> int:
+    def _resolve_signal(self, signal: str) -> Dict[str, Any]:
         cached = self.signal_cache.get(signal)
         if cached is not None:
-            return cached
+            return {
+                "signal_id": cached,
+                "signal_name": self.signal_cache_name.get(signal, signal),
+                "match": "cached",
+            }
         if not self.meta_path:
             raise HTTPException(status_code=400, detail="Signal metadata not loaded")
         row = self.conn.execute(
-            "SELECT signal_id FROM signals WHERE signal_name = ? LIMIT 1",
+            "SELECT signal_id, signal_name FROM signals WHERE signal_name = ? LIMIT 1",
             [signal],
         ).fetchone()
-        if not row:
-            suffix = signal.replace("*", "%").replace("?", "_")
-            suffix_row = self.conn.execute(
-                "SELECT signal_id, signal_name FROM signals WHERE signal_name LIKE ? LIMIT 2",
-                [f"%{suffix}"],
-            ).fetchall()
-            if len(suffix_row) == 1:
-                signal_id = int(suffix_row[0][0])
-                self.signal_cache[signal] = signal_id
-                return signal_id
-            parts = [p for p in signal.replace("*", "%").replace("?", "_").split(".") if p]
-            pattern = "%" + "%".join(parts) + "%" if parts else signal.replace("*", "%").replace("?", "_")
-            candidates = self.conn.execute(
-                "SELECT signal_id, signal_name FROM signals WHERE signal_name LIKE ? LIMIT 20",
-                [pattern],
-            ).fetchall()
-            if len(candidates) == 1:
-                signal_id = int(candidates[0][0])
-                self.signal_cache[signal] = signal_id
-                return signal_id
-            if candidates:
-                names = [c[1] for c in candidates]
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Signal not found: {signal}. Candidates: " + ", ".join(names),
-                )
+        if row:
+            signal_id = int(row[0])
+            resolved = row[1]
+            self.signal_cache[signal] = signal_id
+            self.signal_cache_name[signal] = resolved
+            return {"signal_id": signal_id, "signal_name": resolved, "match": "exact"}
+
+        suffix = signal.replace("*", "%").replace("?", "_")
+        suffix_rows = self.conn.execute(
+            "SELECT signal_id, signal_name FROM signals WHERE signal_name LIKE ? LIMIT 200",
+            [f"%{suffix}"],
+        ).fetchall()
+        if len(suffix_rows) == 1:
+            signal_id = int(suffix_rows[0][0])
+            resolved = suffix_rows[0][1]
+            self.signal_cache[signal] = signal_id
+            self.signal_cache_name[signal] = resolved
+            return {"signal_id": signal_id, "signal_name": resolved, "match": "suffix"}
+
+        parts = [p for p in signal.replace("*", "%").replace("?", "_").split(".") if p]
+        pattern = "%" + "%".join(parts) + "%" if parts else signal.replace("*", "%").replace("?", "_")
+        candidates = self.conn.execute(
+            "SELECT signal_id, signal_name FROM signals WHERE signal_name LIKE ? LIMIT 200",
+            [pattern],
+        ).fetchall()
+        if not candidates:
             raise HTTPException(status_code=404, detail=f"Signal not found: {signal}")
-        signal_id = int(row[0])
+
+        def score(name: str) -> int:
+            s = 0
+            if name == signal:
+                s += 1000
+            if name.endswith(signal):
+                s += 400
+            if parts:
+                s += 10 * len(parts)
+                idx = 0
+                for p in parts:
+                    pos = name.find(p, idx)
+                    if pos < 0:
+                        s -= 5
+                        break
+                    idx = pos + len(p)
+                    s += 5
+            s -= len(name) // 5
+            return s
+
+        candidates_sorted = sorted(candidates, key=lambda c: (-score(c[1]), len(c[1])))
+        signal_id = int(candidates_sorted[0][0])
+        resolved = candidates_sorted[0][1]
         self.signal_cache[signal] = signal_id
-        return signal_id
+        self.signal_cache_name[signal] = resolved
+        return {"signal_id": signal_id, "signal_name": resolved, "match": "fuzzy"}
+
+    def _signal_id(self, signal: str) -> int:
+        return self._resolve_signal(signal)["signal_id"]
 
     def query(self, signal: str, start: int, end: int) -> Dict[str, Any]:
         """
@@ -306,8 +337,16 @@ class WaveformDatabase:
             }
 
         summaries = []
+        seen_ids: Dict[int, int] = {}
         for signal in signals:
-            signal_id = self._signal_id(signal)
+            resolved = self._resolve_signal(signal)
+            signal_id = resolved["signal_id"]
+            existing_idx = seen_ids.get(signal_id)
+            if existing_idx is not None:
+                aliases = summaries[existing_idx].setdefault("aliases", [])
+                if signal not in aliases:
+                    aliases.append(signal)
+                continue
 
             initial_row = self.conn.execute(
                 "SELECT value_raw FROM wave WHERE signal_id = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT 1",
@@ -348,7 +387,10 @@ class WaveformDatabase:
             summaries.append(
                 {
                     "signal": signal,
+                    "resolved_signal": resolved["signal_name"],
+                    "match": resolved["match"],
                     "signal_id": signal_id,
+                    "aliases": [signal],
                     "start_timestamp": start_ts,
                     "end_timestamp": end_ts,
                     "initial_value": initial_row[0] if initial_row else None,
@@ -361,6 +403,7 @@ class WaveformDatabase:
                     "truncated": truncated,
                 }
             )
+            seen_ids[signal_id] = len(summaries) - 1
 
         return {
             "range": range_info,
@@ -429,6 +472,9 @@ class WaveformDatabase:
             out_signals.append(
                 {
                     "signal": item["signal"],
+                    "resolved_signal": item.get("resolved_signal", item["signal"]),
+                    "match": item.get("match", "unknown"),
+                    "aliases": item.get("aliases", [item["signal"]]),
                     "signal_id": item["signal_id"],
                     "raw": raw,
                     "analysis": analysis,

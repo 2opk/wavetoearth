@@ -6,6 +6,7 @@ import time
 import os
 import argparse
 import socket
+import re
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from urllib.parse import urlparse
@@ -92,6 +93,45 @@ def _ensure_loaded(file_path: str) -> None:
 def _parse_signals(signals: str) -> List[str]:
     return [s.strip() for s in signals.split(",") if s.strip()]
 
+def _wildcard_to_regex(pattern: str) -> str:
+    buf = []
+    for ch in pattern:
+        if ch == "*":
+            buf.append(".*")
+        elif ch == "?":
+            buf.append(".")
+        else:
+            buf.append(re.escape(ch))
+    return "".join(buf)
+
+def _expand_signals(signal_list: List[str]) -> List[str]:
+    return _expand_signals_with_limit(signal_list, 0)
+
+def _expand_signals_with_limit(signal_list: List[str], max_expand: int) -> List[str]:
+    expanded: List[str] = []
+    for sig in signal_list:
+        if "*" in sig or "?" in sig:
+            regex = _wildcard_to_regex(sig)
+            resp = requests.get(f"{SERVER_URL}/signals", params={"pattern": regex})
+            resp.raise_for_status()
+            matches = resp.json().get("signals", [])
+            if not matches:
+                raise RuntimeError(f"No signals matched pattern: {sig}")
+            if max_expand > 0 and len(matches) > max_expand:
+                raise RuntimeError(f"Pattern '{sig}' matched {len(matches)} signals (> {max_expand})")
+            expanded.extend(matches)
+        else:
+            expanded.append(sig)
+    # de-dup while preserving order
+    seen = set()
+    ordered: List[str] = []
+    for sig in expanded:
+        if sig in seen:
+            continue
+        seen.add(sig)
+        ordered.append(sig)
+    return ordered
+
 def _run_inspect(
     file_path: str,
     signals: str,
@@ -104,12 +144,14 @@ def _run_inspect(
     include_changes: bool,
     max_changes: int,
     max_unique: int,
+    max_expand: int,
 ):
     signal_list = _parse_signals(signals)
     if not signal_list:
         raise RuntimeError("signals must be a comma-separated list")
 
     _ensure_loaded(file_path)
+    signal_list = _expand_signals_with_limit(signal_list, max_expand)
 
     payload = {
         "signals": signal_list,
@@ -153,8 +195,17 @@ def _render_inspect_output(data: Dict[str, Any], include_changes: bool) -> None:
     for item in data.get("signals", []):
         raw = item.get("raw", {})
         analysis = item.get("analysis", {})
+        resolved = item.get("resolved_signal", item.get("signal"))
+        aliases = item.get("aliases", [])
         typer.echo("")
-        typer.echo(f"Signal: {item.get('signal')} (id={item.get('signal_id')})")
+        if resolved and resolved != item.get("signal"):
+            typer.echo(
+                f"Signal: {item.get('signal')} -> {resolved} (id={item.get('signal_id')}, match={item.get('match')})"
+            )
+        else:
+            typer.echo(f"Signal: {item.get('signal')} (id={item.get('signal_id')})")
+        if aliases and len(aliases) > 1:
+            typer.echo(f"  aliases: {aliases}")
         typer.echo(f"  initial: {raw.get('initial_value')}  final: {raw.get('final_value')}")
         typer.echo(f"  changes: {raw.get('change_count')}  unique: {raw.get('unique_values')}")
         typer.echo(f"  first_change: {raw.get('first_change')}  last_change: {raw.get('last_change')}")
@@ -199,6 +250,7 @@ def _parse_default_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument("--no-include-changes", dest="include_changes", action="store_false")
     parser.add_argument("--max-changes", dest="max_changes", type=int, default=200)
     parser.add_argument("--max-unique", dest="max_unique", type=int, default=32)
+    parser.add_argument("--max-expand", dest="max_expand", type=int, default=200)
     parser.add_argument("--output", default="json")
     return parser.parse_args(argv)
 
@@ -220,6 +272,7 @@ def _run_default(argv: List[str]) -> int:
                 args.include_changes,
                 args.max_changes,
                 args.max_unique,
+                args.max_expand,
             )
             results.append({"file": abs_path, "data": data})
 
@@ -483,6 +536,7 @@ def inspect(
     include_changes: bool = True,
     max_changes: int = 200,
     max_unique: int = 32,
+    max_expand: int = 200,
     output: str = "json",
 ):
     """
@@ -504,6 +558,7 @@ def inspect(
                 include_changes,
                 max_changes,
                 max_unique,
+                max_expand,
             )
             results.append({"file": abs_path, "data": data})
 

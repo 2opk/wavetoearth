@@ -29,7 +29,9 @@ build-backend = "hatchling.build"
 only-include = [
     "cli.py",
     "server.py",
+    "wavetoearth.py",
     "core",
     "README.md",
     "requirements.txt",
+    "requirements-verify.txt",
 ]
