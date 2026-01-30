@@ -1,12 +1,10 @@
 use pyo3::prelude::*;
+use pyo3::types::PyModule;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
-use std::process::{Command as SysCommand, Stdio};
 use std::sync::Arc;
 use vcd::{Parser, Command};
-use wellen::{GetItem, SignalValue};
-use wellen::simple;
 use arrow::array::{UInt64Builder, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
@@ -187,7 +185,7 @@ impl WaveParser {
 
 
 #[pymodule]
-fn wavetoearth_core(_py: Python, m: &PyModule) -> PyResult<()> {
+fn wavetoearth_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WaveParser>()?;
     Ok(())
 }
