@@ -31,9 +31,11 @@ jobs:
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          PYO3_PYTHON: python3.12
         with:
           target: ${{ matrix.os == 'macos-14' && 'aarch64-apple-darwin' || '' }}
-          args: --release --out dist -m wavetoearth_core/Cargo.toml --interpreter python3.12
+          args: --release --out dist -m wavetoearth_core/Cargo.toml --interpreter ${{ env.pythonLocation }}/bin/python
           sccache: 'true'
           manylinux: auto
 
