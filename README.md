@@ -10,48 +10,57 @@ VCD/FST File → Rust Parser → DuckDB → MCP Server → Claude Code
 
 ## Installation
 
-### Option 1: pip (Recommended)
+### Quick Install (Recommended)
+
+One command to install everything (Rust, Python deps, Claude Code MCP):
 
 ```bash
-pip install wavetoearth
+curl -fsSL https://raw.githubusercontent.com/2opk/wavetoearth/master/install.sh | bash
 ```
 
-### Option 2: From Source
+Or manually:
 
 ```bash
-git clone https://github.com/yourusername/wavetoearth.git
+git clone https://github.com/2opk/wavetoearth.git
 cd wavetoearth
-pip install -e .
+./install.sh
 ```
 
-## Claude Code Setup
+### Prerequisites
 
-Just two commands. No server to run, no daemon to manage.
+- **Python 3.10+**
+- **Rust** (installed automatically by script, or manually via [rustup](https://rustup.rs))
+- **Claude Code** CLI
 
-### Step 1: Add MCP Server
+### Manual Installation
+
+If you prefer step-by-step:
 
 ```bash
-claude mcp add wavetoearth --scope user -- wavetoearth-mcp
+# 1. Clone
+git clone https://github.com/2opk/wavetoearth.git
+cd wavetoearth
+
+# 2. Install Rust (if not installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# 3. Build Rust extension
+pip install maturin
+cd wavetoearth_core && maturin develop --release && cd ..
+
+# 4. Install Python package
+pip install -e .
+
+# 5. Add to Claude Code
+claude mcp add wavetoearth --scope user -- python3 $(pwd)/mcp_server.py
 ```
 
-Or manually edit `~/.claude.json`:
+### Verify Installation
 
-```json
-{
-  "mcpServers": {
-    "wavetoearth": {
-      "command": "wavetoearth-mcp",
-      "args": []
-    }
-  }
-}
-```
+In Claude Code, type `/mcp` to see the server status. You should see `wavetoearth` listed with 16 tools.
 
-### Step 2: Verify Installation
-
-In Claude Code, type `/mcp` to see the server status. You should see `wavetoearth` listed with 12 tools.
-
-### Step 3: Start Using
+### Start Using
 
 ```
 You: Load /path/to/simulation.vcd and find where the system hangs
