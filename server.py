@@ -610,7 +610,41 @@ class InspectRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "loaded_file": db.loaded_file}
+    signal_count = 0
+    time_range = {"min": None, "max": None}
+    if db.loaded_file and db.meta_path:
+        signal_count = db.conn.execute("SELECT COUNT(DISTINCT signal_id) FROM signals").fetchone()[0]
+        time_row = db.conn.execute("SELECT MIN(timestamp), MAX(timestamp) FROM wave").fetchone()
+        if time_row:
+            time_range = {"min": time_row[0], "max": time_row[1]}
+    return {
+        "status": "ok",
+        "loaded_file": db.loaded_file,
+        "signal_count": signal_count,
+        "time_range": time_range
+    }
+
+@app.post("/unload")
+def unload_file():
+    """Unload current waveform file and free memory."""
+    if db.loaded_file:
+        old_file = db.loaded_file
+        # Clear all state
+        db.conn.execute("DROP VIEW IF EXISTS wave")
+        db.conn.execute("DROP VIEW IF EXISTS wave_meta")
+        db.conn.execute("DROP VIEW IF EXISTS wave_global")
+        db.conn.execute("DROP VIEW IF EXISTS signals")
+        for table in list(db.cycle_tables.values()):
+            db.conn.execute(f"DROP TABLE IF EXISTS {table}")
+        db.cycle_tables.clear()
+        db.signal_cache.clear()
+        db.signal_cache_name.clear()
+        db.loaded_file = None
+        db.parquet_path = None
+        db.meta_path = None
+        db.global_path = None
+        return {"status": "unloaded", "previous_file": old_file}
+    return {"status": "no_file_loaded"}
 
 @app.post("/load")
 def load_file(req: LoadRequest, background_tasks: BackgroundTasks):
@@ -626,9 +660,82 @@ def load_file(req: LoadRequest, background_tasks: BackgroundTasks):
         logger.error(f"Error loading file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+def build_signal_tree(signals: List[str], max_depth: Optional[int] = None) -> Dict[str, Any]:
+    """Build a hierarchical tree from flat signal names."""
+    tree: Dict[str, Any] = {}
+    for sig in signals:
+        parts = sig.split(".")
+        if max_depth is not None and len(parts) > max_depth:
+            parts = parts[:max_depth] + ["..."]
+
+        current = tree
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+
+        leaf = parts[-1]
+        if leaf not in current:
+            current[leaf] = {"_signals": []}
+        if "_signals" not in current[leaf]:
+            current[leaf]["_signals"] = []
+        current[leaf]["_signals"].append(sig)
+    return tree
+
+
+def format_tree_text(tree: Dict[str, Any], prefix: str = "", is_last: bool = True) -> str:
+    """Format tree as text for display."""
+    lines = []
+    items = [(k, v) for k, v in tree.items() if k != "_signals"]
+
+    for i, (key, subtree) in enumerate(items):
+        is_last_item = (i == len(items) - 1)
+        connector = "`-- " if is_last_item else "|-- "
+
+        def count_signals(t: Dict[str, Any]) -> int:
+            c = len(t.get("_signals", []))
+            for k, v in t.items():
+                if k != "_signals" and isinstance(v, dict):
+                    c += count_signals(v)
+            return c
+
+        subtree_count = count_signals(subtree)
+        lines.append(f"{prefix}{connector}{key} ({subtree_count} signals)")
+
+        extension = "    " if is_last_item else "|   "
+        subtree_text = format_tree_text(subtree, prefix + extension, is_last_item)
+        if subtree_text:
+            lines.append(subtree_text)
+
+    return "\n".join(lines)
+
+
 @app.get("/signals")
-def list_signals(pattern: Optional[str] = None):
-    return {"signals": db.get_signal_names(pattern)}
+def list_signals(
+    pattern: Optional[str] = None,
+    tree: bool = False,
+    max_depth: Optional[int] = 4,
+    limit: int = 500
+):
+    """List signals with optional tree view."""
+    signals = db.get_signal_names(pattern)
+    total = len(signals)
+
+    if tree:
+        signal_tree = build_signal_tree(signals, max_depth)
+        tree_text = format_tree_text(signal_tree)
+        return {
+            "total_signals": total,
+            "tree": tree_text,
+            "note": f"Showing hierarchy up to depth {max_depth}"
+        }
+    else:
+        truncated = len(signals) > limit
+        return {
+            "total_signals": total,
+            "signals": signals[:limit],
+            "truncated": truncated
+        }
 
 @app.post("/query")
 def query_signal(req: QueryRequest):
@@ -685,6 +792,182 @@ def analyze_signal(req: QueryRequest):
 
     summary = SemanticAnalyzer.summarize_activity(req.signal, times, values, req.start, req.end)
     return summary
+
+
+class FindStallRequest(BaseModel):
+    signal: str
+    min_duration: int = 1000
+    start: Optional[int] = None
+    end: Optional[int] = None
+    max_results: int = 10
+
+
+class LastActivityRequest(BaseModel):
+    signals: Optional[List[str]] = None
+    pattern: Optional[str] = None
+    sort_by: str = "time_desc"
+    limit: int = 20
+
+
+class ComparePointsRequest(BaseModel):
+    signals: List[str]
+    time_a: int
+    time_b: int
+
+
+@app.post("/find_stall")
+def find_stall(req: FindStallRequest):
+    """Find where a signal stops changing (potential deadlock/stall)."""
+    if not db.loaded_file:
+        raise HTTPException(status_code=400, detail="No file loaded")
+
+    signal_id = db._signal_id(req.signal)
+    resolved = db._resolve_signal(req.signal)
+    start = req.start
+    end = req.end
+
+    if start is None or end is None:
+        bounds = db.conn.execute("SELECT MIN(timestamp), MAX(timestamp) FROM wave").fetchone()
+        if start is None:
+            start = bounds[0]
+        if end is None:
+            end = bounds[1]
+
+    rows = db.conn.execute(
+        """SELECT timestamp, value_raw FROM wave
+           WHERE signal_id = ? AND timestamp >= ? AND timestamp <= ?
+           ORDER BY timestamp ASC""",
+        [signal_id, start, end]
+    ).fetchall()
+
+    stalls = []
+    for i in range(len(rows) - 1):
+        t1, v1 = rows[i]
+        t2, v2 = rows[i + 1]
+        duration = t2 - t1
+        if duration >= req.min_duration:
+            stalls.append({
+                "start_time": t1,
+                "end_time": t2,
+                "duration": duration,
+                "value_held": v1
+            })
+
+    if rows:
+        last_t, last_v = rows[-1]
+        final_duration = end - last_t
+        if final_duration >= req.min_duration:
+            stalls.append({
+                "start_time": last_t,
+                "end_time": end,
+                "duration": final_duration,
+                "value_held": last_v,
+                "note": "Extends to end of trace - POTENTIAL HANG"
+            })
+
+    stalls.sort(key=lambda x: -x["duration"])
+
+    return {
+        "signal": resolved["signal_name"],
+        "search_range": {"start": start, "end": end},
+        "min_duration_threshold": req.min_duration,
+        "stall_periods": stalls[:req.max_results],
+        "total_found": len(stalls)
+    }
+
+
+@app.post("/last_activity")
+def last_activity(req: LastActivityRequest):
+    """Find the last change timestamp for signals."""
+    if not db.loaded_file:
+        raise HTTPException(status_code=400, detail="No file loaded")
+
+    signals = req.signals or []
+    if req.pattern:
+        signals = db.get_signal_names(req.pattern)
+
+    if not signals:
+        raise HTTPException(status_code=400, detail="No signals specified or matched")
+
+    activities = []
+    for signal in signals[:100]:
+        try:
+            resolved = db._resolve_signal(signal)
+            signal_id = resolved["signal_id"]
+
+            last_row = db.conn.execute(
+                """SELECT timestamp, value_raw FROM wave
+                   WHERE signal_id = ? ORDER BY timestamp DESC LIMIT 1""",
+                [signal_id]
+            ).fetchone()
+
+            if last_row:
+                activities.append({
+                    "signal": resolved["signal_name"],
+                    "last_change_time": last_row[0],
+                    "final_value": last_row[1]
+                })
+        except Exception:
+            pass
+
+    if req.sort_by == "time_desc":
+        activities.sort(key=lambda x: -x["last_change_time"])
+    elif req.sort_by == "time_asc":
+        activities.sort(key=lambda x: x["last_change_time"])
+    else:
+        activities.sort(key=lambda x: x["signal"])
+
+    return {
+        "activities": activities[:req.limit],
+        "total_checked": len(activities)
+    }
+
+
+@app.post("/compare_points")
+def compare_points(req: ComparePointsRequest):
+    """Compare signal values at two different time points."""
+    if not db.loaded_file:
+        raise HTTPException(status_code=400, detail="No file loaded")
+
+    comparisons = []
+    for signal in req.signals:
+        try:
+            resolved = db._resolve_signal(signal)
+            signal_id = resolved["signal_id"]
+
+            val_a_row = db.conn.execute(
+                """SELECT value_raw FROM wave
+                   WHERE signal_id = ? AND timestamp <= ?
+                   ORDER BY timestamp DESC LIMIT 1""",
+                [signal_id, req.time_a]
+            ).fetchone()
+
+            val_b_row = db.conn.execute(
+                """SELECT value_raw FROM wave
+                   WHERE signal_id = ? AND timestamp <= ?
+                   ORDER BY timestamp DESC LIMIT 1""",
+                [signal_id, req.time_b]
+            ).fetchone()
+
+            val_a = val_a_row[0] if val_a_row else None
+            val_b = val_b_row[0] if val_b_row else None
+
+            comparisons.append({
+                "signal": signal,
+                "resolved": resolved["signal_name"],
+                f"value_at_{req.time_a}": val_a,
+                f"value_at_{req.time_b}": val_b,
+                "changed": val_a != val_b
+            })
+        except Exception as e:
+            comparisons.append({"signal": signal, "error": str(e)})
+
+    return {
+        "time_a": req.time_a,
+        "time_b": req.time_b,
+        "comparisons": comparisons,
+        "changed_count": sum(1 for c in comparisons if c.get("changed", False))
+    }
 
 
 def start_server(port=8000):

@@ -215,6 +215,11 @@ impl FastVcdParser {
                 line = &line[..line.len() - 1];
             }
 
+            // Trim leading whitespace for VCD files with indentation
+            while !line.is_empty() && (line[0] == b' ' || line[0] == b'\t') {
+                line = &line[1..];
+            }
+
             if line.is_empty() {
                 cursor = end + 1;
                 continue;

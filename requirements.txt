@@ -7,3 +7,4 @@ requests
 duckdb
 redis
 pyarrow
+mcp>=1.0.0
