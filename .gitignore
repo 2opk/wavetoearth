@@ -2,3 +2,20 @@ test
 __pycache__
 *.log
 *.parquet
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+*.so
+*.pyd
+
+# Claude Code
+.claude/
+
+# IDE
+.vscode/
+.idea/
+
+# Local config
+claude_mcp_config.json
